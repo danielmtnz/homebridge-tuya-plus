@@ -404,7 +404,9 @@ While still in early testing, you can use this to open and close the garage door
 ```
 
 ### Simple Garage Doors
-For very basic garage door openers and sliding gate controllers that expose only three momentary action DPs — one to open, one to stop, one to close — with no position or status feedback. The plugin tracks the target state locally and persists it across restarts, so HomeKit always reflects whatever was last requested. Triggering a change sends the stop command first (so reversing direction mid-motion works; it is a no-op when the gate is idle) and then the open or close command. There is no obstruction detection.
+For very basic garage door openers and sliding gate controllers that expose only three momentary action DPs — one to open, one to stop, one to close — with no position or status feedback. The plugin tracks the target state locally and persists it across restarts, so HomeKit always reflects whatever was last requested. Triggering a change sends the stop command first (so reversing direction mid-motion works; it is a no-op when the gate is idle), waits `commandDelay` milliseconds, and then sends the open or close command. There is no obstruction detection.
+
+If your controller stops the gate but does not start moving in the requested direction afterwards, increase `commandDelay` — some devices drop the direction command if it arrives too soon after the stop.
 
 ```json5
 {
@@ -424,7 +426,12 @@ For very basic garage door openers and sliding gate controllers that expose only
     "dpStop": 2,
 
     /* Override the default datapoint identifier for the close action */
-    "dpClose": 3
+    "dpClose": 3,
+
+    /* Milliseconds to wait between the stop and the open/close command.
+       Default is 2000. Raise it if your controller ignores the direction
+       command when it arrives too quickly after the stop. */
+    "commandDelay": 2000
 }
 ```
 
