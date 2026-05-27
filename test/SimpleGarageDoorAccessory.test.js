@@ -29,17 +29,31 @@ function makeSimpleGarage(contextOverrides = {}) {
 // setTargetDoorState — device commands
 // ---------------------------------------------------------------------------
 describe('SimpleGarageDoorAccessory.setTargetDoorState — device commands', () => {
-    test('OPEN sends stop=true then open=true', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    test('OPEN sends stop=true immediately, then open=true after 500ms', () => {
         const { instance, device } = makeSimpleGarage();
         instance.setTargetDoorState(TDS.OPEN);
+
+        expect(device.update).toHaveBeenCalledTimes(1);
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+
+        jest.advanceTimersByTime(499);
+        expect(device.update).toHaveBeenCalledTimes(1);
+
+        jest.advanceTimersByTime(1);
+        expect(device.update).toHaveBeenCalledTimes(2);
         expect(device.update).toHaveBeenNthCalledWith(2, { '1': true });
     });
 
-    test('CLOSED sends stop=true then close=true', () => {
+    test('CLOSED sends stop=true immediately, then close=true after 500ms', () => {
         const { instance, device } = makeSimpleGarage();
         instance.setTargetDoorState(TDS.CLOSED);
+
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+
+        jest.advanceTimersByTime(500);
         expect(device.update).toHaveBeenNthCalledWith(2, { '3': true });
     });
 
@@ -47,6 +61,7 @@ describe('SimpleGarageDoorAccessory.setTargetDoorState — device commands', () 
         const { instance, device } = makeSimpleGarage();
         device.connected = false;
         instance.setTargetDoorState(TDS.OPEN);
+        jest.advanceTimersByTime(500);
         expect(device.update).not.toHaveBeenCalled();
     });
 
@@ -57,7 +72,25 @@ describe('SimpleGarageDoorAccessory.setTargetDoorState — device commands', () 
         instance.dpClose = '103';
         instance.setTargetDoorState(TDS.OPEN);
         expect(device.update).toHaveBeenNthCalledWith(1, { '102': true });
+        jest.advanceTimersByTime(500);
         expect(device.update).toHaveBeenNthCalledWith(2, { '101': true });
+    });
+
+    test('Reversing direction within the stop->direction window cancels the pending direction command', () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.setTargetDoorState(TDS.OPEN);
+        expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+
+        jest.advanceTimersByTime(200);
+        instance.setTargetDoorState(TDS.CLOSED);
+
+        // A second stop is sent, but the originally-pending open must not fire.
+        expect(device.update).toHaveBeenCalledTimes(2);
+        expect(device.update).toHaveBeenNthCalledWith(2, { '2': true });
+
+        jest.advanceTimersByTime(500);
+        expect(device.update).toHaveBeenCalledTimes(3);
+        expect(device.update).toHaveBeenNthCalledWith(3, { '3': true });
     });
 });
 
@@ -68,7 +101,7 @@ describe('SimpleGarageDoorAccessory.setTargetDoorState — CurrentDoorState tran
     beforeEach(() => jest.useFakeTimers());
     afterEach(() => jest.useRealTimers());
 
-    test('CurrentDoorState lags the target by 1s when opening', () => {
+    test('CurrentDoorState lags the target by 1.5s when opening', () => {
         const { instance } = makeSimpleGarage();
         instance.currentDoorState = CDS.CLOSED;
         instance.characteristicCurrentDoorState.value = CDS.CLOSED;
@@ -76,7 +109,7 @@ describe('SimpleGarageDoorAccessory.setTargetDoorState — CurrentDoorState tran
         instance.setTargetDoorState(TDS.OPEN);
         expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
 
-        jest.advanceTimersByTime(999);
+        jest.advanceTimersByTime(1499);
         expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
 
         jest.advanceTimersByTime(1);
@@ -84,7 +117,7 @@ describe('SimpleGarageDoorAccessory.setTargetDoorState — CurrentDoorState tran
         expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
     });
 
-    test('CurrentDoorState lags the target by 1s when closing', () => {
+    test('CurrentDoorState lags the target by 1.5s when closing', () => {
         const { instance } = makeSimpleGarage();
         instance.currentDoorState = CDS.OPEN;
         instance.characteristicCurrentDoorState.value = CDS.OPEN;
@@ -92,21 +125,21 @@ describe('SimpleGarageDoorAccessory.setTargetDoorState — CurrentDoorState tran
         instance.setTargetDoorState(TDS.CLOSED);
         expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
 
-        jest.advanceTimersByTime(1000);
+        jest.advanceTimersByTime(1500);
         expect(instance.currentDoorState).toBe(CDS.CLOSED);
         expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
     });
 
-    test('Reversing direction within the 1s window resets the timer', () => {
+    test('Reversing direction within the 1.5s window resets the timer', () => {
         const { instance } = makeSimpleGarage();
         instance.currentDoorState = CDS.OPEN;
         instance.characteristicCurrentDoorState.value = CDS.OPEN;
 
         instance.setTargetDoorState(TDS.CLOSED);
-        jest.advanceTimersByTime(500);
+        jest.advanceTimersByTime(1000);
         instance.setTargetDoorState(TDS.OPEN);
 
-        jest.advanceTimersByTime(500);
+        jest.advanceTimersByTime(1000);
         expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
 
         jest.advanceTimersByTime(500);
@@ -119,6 +152,9 @@ describe('SimpleGarageDoorAccessory.setTargetDoorState — CurrentDoorState tran
 // Persistence
 // ---------------------------------------------------------------------------
 describe('SimpleGarageDoorAccessory persistence', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
     test('Stores the latest target on the accessory context', () => {
         const { instance, accessory } = makeSimpleGarage();
         instance.setTargetDoorState(TDS.CLOSED);
