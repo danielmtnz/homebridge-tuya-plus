@@ -30,132 +30,160 @@ function installRealEvents(device) {
     device.listenerCount = (event) => (handlers.get(event) || []).length;
 }
 
-function makeSimpleGarage(contextOverrides = {}) {
+function makeSimpleGarage(initialContext = {}) {
     const { instance, device, accessory, platform } = makeInstance(
         SimpleGarageDoorAccessory,
         {},
-        { manufacturer: 'Generic', ...contextOverrides }
+        { manufacturer: 'Generic', ...initialContext }
     );
 
     installRealEvents(device);
 
-    // Replicate what _registerCharacteristics would set up.
+    // Mirror the state that _registerCharacteristics would set up. We can't
+    // call it directly because the mock service shares a single mock
+    // characteristic across calls — wiring each role manually keeps the
+    // assertions untangled.
     instance.dpOpen = '1';
     instance.dpStop = '2';
     instance.dpClose = '3';
-    instance.opToken = 0;
     instance.currentDoorState = CDS.OPEN;
+    instance.desiredTarget = TDS.OPEN;
+    instance.worker = null;
     instance.characteristicCurrentDoorState = {
         value: CDS.OPEN,
         updateValue: jest.fn().mockImplementation(function(v) { this.value = v; return this; }),
     };
+    accessory.context.cachedTargetDoorState = TDS.OPEN;
+
+    // Mirror the persistent change listener registered in production.
+    device.on('change', changes => instance._onDeviceChange(changes));
 
     return { instance, device, accessory, platform };
 }
 
+// Simulate the device echoing a DP back to false (its "command consumed"
+// signal). Drives both the worker's per-step listener and the persistent
+// CurrentDoorState listener.
+function emitReset(device, dp) {
+    device.emit('change', { [dp]: false }, { [dp]: false });
+}
+
 // ---------------------------------------------------------------------------
-// setTargetDoorState — device commands
+// _onDeviceChange — the persistent listener that drives CurrentDoorState
 // ---------------------------------------------------------------------------
-describe('SimpleGarageDoorAccessory.setTargetDoorState — device commands', () => {
+describe('SimpleGarageDoorAccessory._onDeviceChange', () => {
+    test('Open DP resetting to false sets CurrentDoorState to OPEN', () => {
+        const { instance } = makeSimpleGarage();
+        instance.currentDoorState = CDS.CLOSED;
+        instance.characteristicCurrentDoorState.value = CDS.CLOSED;
+
+        instance._onDeviceChange({ '1': false });
+
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
+    });
+
+    test('Close DP resetting to false sets CurrentDoorState to CLOSED', () => {
+        const { instance } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+        instance.characteristicCurrentDoorState.value = CDS.OPEN;
+
+        instance._onDeviceChange({ '3': false });
+
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
+    });
+
+    test('Open DP echoing back to true does not change CurrentDoorState', () => {
+        const { instance } = makeSimpleGarage();
+        instance.currentDoorState = CDS.CLOSED;
+
+        instance._onDeviceChange({ '1': true });
+
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+    });
+
+    test('Stop DP resets do not change CurrentDoorState', () => {
+        const { instance } = makeSimpleGarage();
+        instance.currentDoorState = CDS.CLOSED;
+
+        instance._onDeviceChange({ '2': false });
+
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+    });
+
+    test('No characteristic write when CurrentDoorState already matches', () => {
+        const { instance } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+
+        instance._onDeviceChange({ '1': false });
+
+        expect(instance.characteristicCurrentDoorState.updateValue).not.toHaveBeenCalled();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// setTargetDoorState — single command (target differs from current)
+// ---------------------------------------------------------------------------
+describe('SimpleGarageDoorAccessory.setTargetDoorState — single command', () => {
     beforeEach(() => jest.useFakeTimers());
     afterEach(() => jest.useRealTimers());
 
-    test('OPEN sends stop=true, waits for stop reset, then sends open=true 500ms later', async () => {
+    test('OPEN sends stop, waits for stop reset + 500ms, then sends open; CurrentDoorState flips on open reset', async () => {
         const { instance, device } = makeSimpleGarage();
-        const op = instance.setTargetDoorState(TDS.OPEN);
+        instance.currentDoorState = CDS.CLOSED;
+        instance.characteristicCurrentDoorState.value = CDS.CLOSED;
+        instance.desiredTarget = TDS.CLOSED;
 
+        instance.setTargetDoorState(TDS.OPEN);
         await jest.advanceTimersByTimeAsync(0);
-        expect(device.update).toHaveBeenCalledTimes(1);
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
 
-        // Even after a full second the open should not have been sent yet —
-        // we're still waiting on the reset echo.
-        await jest.advanceTimersByTimeAsync(1000);
-        expect(device.update).toHaveBeenCalledTimes(1);
-
-        // Device echoes the stop DP back to false (it auto-resets).
-        device.emit('change', { '2': false }, { '2': false });
-
+        emitReset(device, '2');
         await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS - 1);
         expect(device.update).toHaveBeenCalledTimes(1);
 
         await jest.advanceTimersByTimeAsync(1);
-        expect(device.update).toHaveBeenCalledTimes(2);
         expect(device.update).toHaveBeenNthCalledWith(2, { '1': true });
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
 
-        // Direction reset closes out the chain.
-        device.emit('change', { '1': false }, { '1': false });
-        await op;
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
+        expect(instance.worker).toBeNull();
     });
 
-    test('CLOSED waits for stop reset, then sends close=true', async () => {
+    test('CLOSE sends stop, waits, then sends close; CurrentDoorState flips on close reset', async () => {
         const { instance, device } = makeSimpleGarage();
-        const op = instance.setTargetDoorState(TDS.CLOSED);
+        instance.currentDoorState = CDS.OPEN;
+        instance.characteristicCurrentDoorState.value = CDS.OPEN;
 
+        instance.setTargetDoorState(TDS.CLOSED);
         await jest.advanceTimersByTimeAsync(0);
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
 
-        device.emit('change', { '2': false }, { '2': false });
+        emitReset(device, '2');
         await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
         expect(device.update).toHaveBeenNthCalledWith(2, { '3': true });
 
-        device.emit('change', { '3': false }, { '3': false });
-        await op;
+        emitReset(device, '3');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
+        expect(instance.worker).toBeNull();
     });
 
-    test('A {dp: true} echo does not satisfy the reset wait', async () => {
+    test('Target matching current produces no commands', async () => {
         const { instance, device } = makeSimpleGarage();
-        const op = instance.setTargetDoorState(TDS.OPEN);
+        instance.currentDoorState = CDS.OPEN;
+        instance.desiredTarget = TDS.OPEN;
 
-        await jest.advanceTimersByTimeAsync(0);
-        expect(device.update).toHaveBeenCalledTimes(1);
+        instance.setTargetDoorState(TDS.OPEN);
+        await jest.advanceTimersByTimeAsync(
+            STOP_RESET_TIMEOUT_MS + POST_RESET_DELAY_MS + DIRECTION_RESET_TIMEOUT_MS
+        );
 
-        // Device first echoes the stop DP back to true (acknowledging our write).
-        // This should NOT be treated as the reset.
-        device.emit('change', { '2': true }, { '2': true });
-        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-        expect(device.update).toHaveBeenCalledTimes(1);
-
-        // Then the device resets it to false.
-        device.emit('change', { '2': false }, { '2': false });
-        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-        expect(device.update).toHaveBeenNthCalledWith(2, { '1': true });
-
-        device.emit('change', { '1': false }, { '1': false });
-        await op;
-    });
-
-    test('Falls back to sending the direction after STOP_RESET_TIMEOUT_MS if no echo arrives', async () => {
-        const { instance, device } = makeSimpleGarage();
-        const op = instance.setTargetDoorState(TDS.OPEN);
-
-        await jest.advanceTimersByTimeAsync(0);
-        expect(device.update).toHaveBeenCalledTimes(1);
-
-        await jest.advanceTimersByTimeAsync(STOP_RESET_TIMEOUT_MS - 1);
-        expect(device.update).toHaveBeenCalledTimes(1);
-
-        await jest.advanceTimersByTimeAsync(1 + POST_RESET_DELAY_MS);
-        expect(device.update).toHaveBeenNthCalledWith(2, { '1': true });
-
-        device.emit('change', { '1': false }, { '1': false });
-        await op;
-    });
-
-    test('Cleans up the change listener once the wait resolves', async () => {
-        const { instance, device } = makeSimpleGarage();
-        const op = instance.setTargetDoorState(TDS.OPEN);
-        await jest.advanceTimersByTimeAsync(0);
-        expect(device.listenerCount('change')).toBe(1);
-
-        device.emit('change', { '2': false }, { '2': false });
-        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-        // Direction listener should now be attached.
-        expect(device.listenerCount('change')).toBe(1);
-
-        device.emit('change', { '1': false }, { '1': false });
-        await op;
-        expect(device.listenerCount('change')).toBe(0);
+        expect(device.update).not.toHaveBeenCalled();
+        expect(instance.worker).toBeNull();
     });
 
     test('Custom DPs are respected', async () => {
@@ -163,124 +191,227 @@ describe('SimpleGarageDoorAccessory.setTargetDoorState — device commands', () 
         instance.dpOpen = '101';
         instance.dpStop = '102';
         instance.dpClose = '103';
-        const op = instance.setTargetDoorState(TDS.OPEN);
+        instance.currentDoorState = CDS.CLOSED;
 
+        instance.setTargetDoorState(TDS.OPEN);
         await jest.advanceTimersByTimeAsync(0);
         expect(device.update).toHaveBeenNthCalledWith(1, { '102': true });
 
-        device.emit('change', { '102': false }, { '102': false });
+        emitReset(device, '102');
         await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
         expect(device.update).toHaveBeenNthCalledWith(2, { '101': true });
 
-        device.emit('change', { '101': false }, { '101': false });
-        await op;
-    });
-
-    test('Skips writes when the device is disconnected', async () => {
-        const { instance, device } = makeSimpleGarage();
-        device.connected = false;
-        const op = instance.setTargetDoorState(TDS.OPEN);
-        await jest.advanceTimersByTimeAsync(
-            STOP_RESET_TIMEOUT_MS + POST_RESET_DELAY_MS + DIRECTION_RESET_TIMEOUT_MS
-        );
-        await op;
-        expect(device.update).not.toHaveBeenCalled();
-    });
-
-    test('Reversing during the stop->direction wait cancels the pending direction command', async () => {
-        const { instance, device } = makeSimpleGarage();
-        const op1 = instance.setTargetDoorState(TDS.OPEN);
+        emitReset(device, '101');
         await jest.advanceTimersByTimeAsync(0);
-        expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
-
-        const op2 = instance.setTargetDoorState(TDS.CLOSED);
-        await jest.advanceTimersByTimeAsync(0);
-
-        // A second stop is sent; the originally-pending open must not fire.
-        expect(device.update).toHaveBeenCalledTimes(2);
-        expect(device.update).toHaveBeenNthCalledWith(2, { '2': true });
-
-        device.emit('change', { '2': false }, { '2': false });
-        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-        expect(device.update).toHaveBeenCalledTimes(3);
-        expect(device.update).toHaveBeenNthCalledWith(3, { '3': true });
-
-        device.emit('change', { '3': false }, { '3': false });
-        await op1;
-        await op2;
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
     });
 });
 
 // ---------------------------------------------------------------------------
-// CurrentDoorState transition
+// Spam / re-entrancy
 // ---------------------------------------------------------------------------
-describe('SimpleGarageDoorAccessory.setTargetDoorState — CurrentDoorState transition', () => {
+describe('SimpleGarageDoorAccessory.setTargetDoorState — spam toggling', () => {
     beforeEach(() => jest.useFakeTimers());
     afterEach(() => jest.useRealTimers());
 
-    test('CurrentDoorState flips when the direction DP echoes back to false', async () => {
+    test('Toggling back to current state during stop suppresses the direction command', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+
+        instance.setTargetDoorState(TDS.CLOSED);
+        await jest.advanceTimersByTimeAsync(0);
+        expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+
+        // User reverts mid-stop.
+        instance.setTargetDoorState(TDS.OPEN);
+
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+
+        // Only stop was sent — no direction.
+        expect(device.update).toHaveBeenCalledTimes(1);
+        expect(instance.worker).toBeNull();
+    });
+
+    test('Latest desired target wins among multiple toggles during stop', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+
+        instance.setTargetDoorState(TDS.CLOSED);
+        await jest.advanceTimersByTimeAsync(0);
+
+        // Spam — final state is CLOSED.
+        instance.setTargetDoorState(TDS.OPEN);
+        instance.setTargetDoorState(TDS.CLOSED);
+        instance.setTargetDoorState(TDS.OPEN);
+        instance.setTargetDoorState(TDS.CLOSED);
+
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(2, { '3': true });
+
+        emitReset(device, '3');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
+        expect(instance.worker).toBeNull();
+    });
+
+    test('Toggling to opposite after the direction completes triggers a fresh stop+direction', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+        instance.characteristicCurrentDoorState.value = CDS.OPEN;
+
+        instance.setTargetDoorState(TDS.CLOSED);
+        await jest.advanceTimersByTimeAsync(0);
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        emitReset(device, '3');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
+        expect(instance.worker).toBeNull();
+
+        // User reverses.
+        instance.setTargetDoorState(TDS.OPEN);
+        await jest.advanceTimersByTimeAsync(0);
+        expect(device.update).toHaveBeenNthCalledWith(3, { '2': true });
+
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(4, { '1': true });
+
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
+    });
+
+    test('Toggling to opposite while the direction is in flight queues a follow-up stop+direction', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+        instance.characteristicCurrentDoorState.value = CDS.OPEN;
+
+        instance.setTargetDoorState(TDS.CLOSED);
+        await jest.advanceTimersByTimeAsync(0);
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(2, { '3': true });
+
+        // Reverse mid-direction.
+        instance.setTargetDoorState(TDS.OPEN);
+        emitReset(device, '3');
+        await jest.advanceTimersByTimeAsync(0);
+        // Close reset flipped UI to CLOSED, then the loop noticed target=OPEN
+        // and sent the next stop.
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
+        expect(device.update).toHaveBeenNthCalledWith(3, { '2': true });
+
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(4, { '1': true });
+
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
+        expect(instance.worker).toBeNull();
+    });
+
+    test('Pressing the same target repeatedly while the worker runs is a no-op', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+
+        instance.setTargetDoorState(TDS.CLOSED);
+        await jest.advanceTimersByTimeAsync(0);
+        const callsAfterFirstStop = device.update.mock.calls.length;
+
+        instance.setTargetDoorState(TDS.CLOSED);
+        instance.setTargetDoorState(TDS.CLOSED);
+        await jest.advanceTimersByTimeAsync(0);
+        expect(device.update.mock.calls.length).toBe(callsAfterFirstStop);
+
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        emitReset(device, '3');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.worker).toBeNull();
+    });
+
+    test('Only a single worker is active across rapid toggles', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+
+        instance.setTargetDoorState(TDS.CLOSED);
+        const workerA = instance.worker;
+        instance.setTargetDoorState(TDS.OPEN);
+        instance.setTargetDoorState(TDS.CLOSED);
+        expect(instance.worker).toBe(workerA);
+
+        await jest.advanceTimersByTimeAsync(0);
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        emitReset(device, '3');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.worker).toBeNull();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Timeout fallbacks
+// ---------------------------------------------------------------------------
+describe('SimpleGarageDoorAccessory — timeout fallbacks', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    test('Falls back to sending the direction after STOP_RESET_TIMEOUT_MS if no echo arrives', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.currentDoorState = CDS.CLOSED;
+
+        instance.setTargetDoorState(TDS.OPEN);
+        await jest.advanceTimersByTimeAsync(0);
+        expect(device.update).toHaveBeenCalledTimes(1);
+
+        await jest.advanceTimersByTimeAsync(STOP_RESET_TIMEOUT_MS + POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(2, { '1': true });
+
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.worker).toBeNull();
+    });
+
+    test('Worker exits and force-flips CurrentDoorState after DIRECTION_RESET_TIMEOUT_MS when the echo is missed', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.currentDoorState = CDS.CLOSED;
         instance.characteristicCurrentDoorState.value = CDS.CLOSED;
 
-        const op = instance.setTargetDoorState(TDS.OPEN);
+        instance.setTargetDoorState(TDS.OPEN);
         await jest.advanceTimersByTimeAsync(0);
-        device.emit('change', { '2': false }, { '2': false });
+        emitReset(device, '2');
         await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(2, { '1': true });
 
-        // Direction has been sent but not yet acknowledged — UI still old.
-        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
-
-        device.emit('change', { '1': false }, { '1': false });
-        await op;
-        expect(instance.currentDoorState).toBe(CDS.OPEN);
+        await jest.advanceTimersByTimeAsync(DIRECTION_RESET_TIMEOUT_MS);
+        // No echo arrived, but the worker mirrors the target anyway so the
+        // loop can settle.
         expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
+        expect(instance.worker).toBeNull();
     });
+});
 
-    test('CurrentDoorState falls back to DIRECTION_RESET_TIMEOUT_MS if the device never resets the direction DP', async () => {
+// ---------------------------------------------------------------------------
+// Disconnect handling
+// ---------------------------------------------------------------------------
+describe('SimpleGarageDoorAccessory — disconnected', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    test('Skips writes when the device is disconnected', async () => {
         const { instance, device } = makeSimpleGarage();
-        instance.currentDoorState = CDS.OPEN;
-        instance.characteristicCurrentDoorState.value = CDS.OPEN;
+        device.connected = false;
+        instance.currentDoorState = CDS.CLOSED;
 
-        const op = instance.setTargetDoorState(TDS.CLOSED);
-        await jest.advanceTimersByTimeAsync(0);
-        device.emit('change', { '2': false }, { '2': false });
-        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
-
-        await jest.advanceTimersByTimeAsync(DIRECTION_RESET_TIMEOUT_MS - 1);
-        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
-
-        await jest.advanceTimersByTimeAsync(1);
-        await op;
-        expect(instance.currentDoorState).toBe(CDS.CLOSED);
-        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.CLOSED);
-    });
-
-    test('Reversing direction mid-transition cancels the stale CurrentDoorState update', async () => {
-        const { instance, device } = makeSimpleGarage();
-        instance.currentDoorState = CDS.OPEN;
-        instance.characteristicCurrentDoorState.value = CDS.OPEN;
-
-        const op1 = instance.setTargetDoorState(TDS.CLOSED);
-        await jest.advanceTimersByTimeAsync(0);
-        device.emit('change', { '2': false }, { '2': false });
-        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-
-        // Close has been sent; before its echo arrives, user reverses.
-        const op2 = instance.setTargetDoorState(TDS.OPEN);
-        await jest.advanceTimersByTimeAsync(0);
-
-        // The stale close-reset echo arriving now must not flip UI to CLOSED.
-        device.emit('change', { '3': false }, { '3': false });
-        device.emit('change', { '2': false }, { '2': false });
-        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-        device.emit('change', { '1': false }, { '1': false });
-
-        await op1;
-        await op2;
-        expect(instance.currentDoorState).toBe(CDS.OPEN);
-        expect(instance.characteristicCurrentDoorState.value).toBe(CDS.OPEN);
+        instance.setTargetDoorState(TDS.OPEN);
+        await jest.advanceTimersByTimeAsync(
+            STOP_RESET_TIMEOUT_MS + POST_RESET_DELAY_MS + DIRECTION_RESET_TIMEOUT_MS
+        );
+        expect(device.update).not.toHaveBeenCalled();
     });
 });
 
@@ -293,16 +424,17 @@ describe('SimpleGarageDoorAccessory persistence', () => {
 
     test('Stores the latest target on the accessory context', async () => {
         const { instance, device, accessory } = makeSimpleGarage();
-        const op1 = instance.setTargetDoorState(TDS.CLOSED);
+        instance.currentDoorState = CDS.OPEN;
+
+        instance.setTargetDoorState(TDS.CLOSED);
         expect(accessory.context.cachedTargetDoorState).toBe(TDS.CLOSED);
-        const op2 = instance.setTargetDoorState(TDS.OPEN);
+
+        instance.setTargetDoorState(TDS.OPEN);
         expect(accessory.context.cachedTargetDoorState).toBe(TDS.OPEN);
 
+        // Drain so the worker resolves cleanly.
         await jest.advanceTimersByTimeAsync(0);
-        device.emit('change', { '2': false }, { '2': false });
+        emitReset(device, '2');
         await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-        device.emit('change', { '1': false }, { '1': false });
-        await op1;
-        await op2;
     });
 });
