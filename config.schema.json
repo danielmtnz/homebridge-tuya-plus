@@ -518,6 +518,14 @@
                 "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
               }
             },
+            "partialOpenMs": {
+              "type": "integer",
+              "placeholder": "2000",
+              "description": "Optional. If set, exposes an additional momentary switch that opens the gate and then closes it again after this many milliseconds (measured from when the gate has fully opened). Leave empty to skip the switch.",
+              "condition": {
+                "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
+              }
+            },
             "flipState": {
               "type": "boolean",
               "condition": {

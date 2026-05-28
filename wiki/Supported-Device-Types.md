@@ -424,7 +424,13 @@ For very basic garage door openers and sliding gate controllers that expose only
     "dpStop": 2,
 
     /* Override the default datapoint identifier for the close action */
-    "dpClose": 3
+    "dpClose": 3,
+
+    /* Optional. If set, exposes an extra momentary switch that opens the
+       gate and then closes it again this many milliseconds after the
+       gate has fully opened. Useful for letting someone pass through
+       briefly. Leave unset to skip the switch. */
+    "partialOpenMs": 2000
 }
 ```
 
