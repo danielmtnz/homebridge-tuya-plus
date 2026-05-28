@@ -5,7 +5,7 @@ const { HAP, makeInstance } = require('./support/mocks');
 
 const { CurrentDoorState: CDS, TargetDoorState: TDS } = HAP.Characteristic;
 
-const STOP_TO_DIRECTION_DELAY_MS = 500;
+const STOP_TO_DIRECTION_DELAY_MS = 1000;
 const CURRENT_STATE_DELAY_MS = 1000;
 const TOTAL_DELAY_MS = STOP_TO_DIRECTION_DELAY_MS + CURRENT_STATE_DELAY_MS;
 
