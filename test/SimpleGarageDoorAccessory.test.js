@@ -582,3 +582,68 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         expect(instance.partialCloseTimer).toBeNull();
     });
 });
+
+// ---------------------------------------------------------------------------
+// Force open/close switches (just verify they route through setTargetDoorState
+// — the queue/debounce behaviour is already covered by the earlier suites)
+// ---------------------------------------------------------------------------
+describe('SimpleGarageDoorAccessory — force switches', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    test('Force Open routes through the public setTargetDoorState path', async () => {
+        const { instance, device, accessory } = makeSimpleGarage();
+        instance.currentDoorState = CDS.CLOSED;
+        instance.characteristicCurrentDoorState.value = CDS.CLOSED;
+        instance.desiredTarget = TDS.CLOSED;
+
+        instance.setTargetDoorState(TDS.OPEN);
+        expect(accessory.context.cachedTargetDoorState).toBe(TDS.OPEN);
+        expect(instance.desiredTarget).toBe(TDS.OPEN);
+
+        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(2, { '1': true });
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+    });
+
+    test('Force Close routes through the public setTargetDoorState path', async () => {
+        const { instance, device, accessory } = makeSimpleGarage();
+        instance.currentDoorState = CDS.OPEN;
+
+        instance.setTargetDoorState(TDS.CLOSED);
+        expect(accessory.context.cachedTargetDoorState).toBe(TDS.CLOSED);
+
+        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(2, { '3': true });
+        emitReset(device, '3');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+    });
+
+    test('A force action while a partial close is armed cancels the auto-close', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.partialOpenMs = 2000;
+        instance.currentDoorState = CDS.OPEN;
+        instance.characteristicCurrentDoorState.value = CDS.OPEN;
+
+        // Partial press while already open: just schedules the close timer.
+        instance._handlePartialOpen();
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.partialCloseTimer).not.toBeNull();
+
+        // Force Open pressed before the auto-close fires.
+        instance.setTargetDoorState(TDS.OPEN);
+        expect(instance.partialCloseTimer).toBeNull();
+
+        await jest.advanceTimersByTimeAsync(10_000);
+        // No close cycle: desiredTarget == current, so nothing was queued.
+        expect(device.update).not.toHaveBeenCalled();
+    });
+});

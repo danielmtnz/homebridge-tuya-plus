@@ -430,7 +430,14 @@ For very basic garage door openers and sliding gate controllers that expose only
        gate and then closes it again this many milliseconds after the
        gate has fully opened. Useful for letting someone pass through
        briefly. Leave unset to skip the switch. */
-    "partialOpenMs": 2000
+    "partialOpenMs": 2000,
+
+    /* Optional. Exposes extra Force Open and Force Close momentary
+       switches alongside the main GarageDoorOpener. They drive the gate
+       through the same queue as the main toggle, but being plain
+       switches they can be used in HomeKit automations (which won't
+       accept GarageDoorOpener targets directly). Default false. */
+    "forceSwitches": true
 }
 ```
 
