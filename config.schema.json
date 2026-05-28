@@ -518,14 +518,6 @@
                 "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
               }
             },
-            "commandDelay": {
-              "type": "integer",
-              "placeholder": "2000",
-              "description": "Milliseconds to wait between the stop command and the open/close command. Increase if your controller drops the direction command after a stop.",
-              "condition": {
-                "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
-              }
-            },
             "flipState": {
               "type": "boolean",
               "condition": {
