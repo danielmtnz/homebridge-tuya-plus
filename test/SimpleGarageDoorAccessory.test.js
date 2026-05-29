@@ -54,6 +54,7 @@ function makeSimpleGarage(initialContext = {}) {
     instance.scheduleTimer = null;
     instance.partialStopTimer = null;
     instance.partialOpenId = 0;
+    instance._partialPending = false;
     instance._currentChangePending = null;
     instance._currentChangeResolve = null;
     instance.characteristicCurrentDoorState = {
@@ -495,7 +496,13 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
     });
 
-    test('Pressing partial again before the stop timer fires restarts the timer', async () => {
+    test('Pressing partial again while the stop timer is armed is ignored (idempotent)', async () => {
+        // HomeKit/iOS retransmit a WRITE if the 204 response is delayed or
+        // dropped, which fires onSet again. The retry must not cancel the
+        // armed stop and push it out — otherwise repeated retries can
+        // delay the auto-stop indefinitely and the gate runs all the way
+        // open. The retry should be ignored; the original timer fires at
+        // its original deadline.
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.OPEN;
@@ -504,17 +511,44 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         await jest.advanceTimersByTimeAsync(0);
 
         await jest.advanceTimersByTimeAsync(1500);
-        // 1.5 s through, press partial again.
+        // 1.5 s in, retry — should be ignored.
         instance._handlePartialOpen();
         await jest.advanceTimersByTimeAsync(0);
+        expect(device.update).not.toHaveBeenCalled();
 
-        // The original timer would have fired at 2000 ms; the restart pushes
-        // it out to 1500 + 2000 = 3500 ms.
-        await jest.advanceTimersByTimeAsync(1999);
+        // Original timer fires at the original 2000 ms deadline.
+        await jest.advanceTimersByTimeAsync(499);
         expect(device.update).not.toHaveBeenCalled();
 
         await jest.advanceTimersByTimeAsync(1);
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+    });
+
+    test('Pressing partial again while the open wait is pending is ignored (idempotent)', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.partialOpenMs = 2000;
+        instance.currentDoorState = CDS.CLOSED;
+        instance.characteristicCurrentDoorState.value = CDS.CLOSED;
+        instance.desiredTarget = TDS.CLOSED;
+
+        instance._handlePartialOpen();
+        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+
+        // Retry lands while we're still waiting for the stop reset / open
+        // echo. The retry should not bump the generation token or restart
+        // anything — the original flow should complete normally.
+        const idBefore = instance.partialOpenId;
+        instance._handlePartialOpen();
+        expect(instance.partialOpenId).toBe(idBefore);
+
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+
+        await jest.advanceTimersByTimeAsync(2000);
+        expect(device.update).toHaveBeenNthCalledWith(3, { '2': true });
     });
 
     test('External setTargetDoorState while the stop timer is armed cancels the auto-stop', async () => {
