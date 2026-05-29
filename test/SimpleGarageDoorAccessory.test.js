@@ -61,6 +61,10 @@ function makeSimpleGarage(initialContext = {}) {
         value: CDS.OPEN,
         updateValue: jest.fn().mockImplementation(function(v) { this.value = v; return this; }),
     };
+    instance.characteristicTargetDoorState = {
+        value: TDS.OPEN,
+        updateValue: jest.fn().mockImplementation(function(v) { this.value = v; return this; }),
+    };
     accessory.context.cachedTargetDoorState = TDS.OPEN;
 
     // Mirror the persistent change listener registered in production.
@@ -469,13 +473,20 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         expect(device.update).toHaveBeenCalledTimes(2);
 
         // Timer fires: raw STOP write goes straight to the device, no queue,
-        // no debounce, no follow-up direction.
+        // no debounce, no follow-up direction. The stop is re-sent a few
+        // times spread over ~1.2 s to defend against dropped writes.
         await jest.advanceTimersByTimeAsync(1);
         expect(device.update).toHaveBeenCalledTimes(3);
         expect(device.update).toHaveBeenNthCalledWith(3, { '2': true });
 
+        await jest.advanceTimersByTimeAsync(1200);
+        expect(device.update).toHaveBeenCalledTimes(6);
+        expect(device.update).toHaveBeenNthCalledWith(4, { '2': true });
+        expect(device.update).toHaveBeenNthCalledWith(5, { '2': true });
+        expect(device.update).toHaveBeenNthCalledWith(6, { '2': true });
+
         await jest.advanceTimersByTimeAsync(10_000);
-        expect(device.update).toHaveBeenCalledTimes(3);
+        expect(device.update).toHaveBeenCalledTimes(6);
         // Gate is now partially open — CurrentDoorState stays OPEN.
         expect(instance.currentDoorState).toBe(CDS.OPEN);
     });
@@ -492,8 +503,12 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         expect(device.update).not.toHaveBeenCalled();
 
         await jest.advanceTimersByTimeAsync(2000);
+        // Four stop sends spread over ~1.2 s; first one fires immediately at
+        // partialOpenMs.
         expect(device.update).toHaveBeenCalledTimes(1);
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+        await jest.advanceTimersByTimeAsync(1200);
+        expect(device.update).toHaveBeenCalledTimes(4);
     });
 
     test('Pressing partial again while the stop timer is armed is ignored (idempotent)', async () => {
