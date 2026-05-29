@@ -65,6 +65,10 @@ function makeSimpleGarage(initialContext = {}) {
         value: TDS.OPEN,
         updateValue: jest.fn().mockImplementation(function(v) { this.value = v; return this; }),
     };
+    instance.characteristicPartialOpen = {
+        value: true,
+        updateValue: jest.fn().mockImplementation(function(v) { this.value = v; return this; }),
+    };
     accessory.context.cachedTargetDoorState = TDS.OPEN;
 
     // Mirror the persistent change listener registered in production.
@@ -746,5 +750,66 @@ describe('SimpleGarageDoorAccessory — force switches', () => {
         // The new target (CLOSED) is acted on through the regular queue.
         await jest.advanceTimersByTimeAsync(SETTLE_MS);
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Partial-open switch is stateful: mirrors CurrentDoorState (ON when the gate
+// is open) and toggling it OFF triggers a standard close cycle.
+// ---------------------------------------------------------------------------
+describe('SimpleGarageDoorAccessory — partial-open switch state', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    test('_setCurrentDoorState mirrors OPEN/CLOSED to the switch', () => {
+        const { instance } = makeSimpleGarage();
+        instance.partialOpenMs = 2000;
+        instance.currentDoorState = CDS.CLOSED;
+        instance.characteristicPartialOpen.value = false;
+
+        instance._setCurrentDoorState(CDS.OPEN);
+        expect(instance.characteristicPartialOpen.value).toBe(true);
+
+        instance._setCurrentDoorState(CDS.CLOSED);
+        expect(instance.characteristicPartialOpen.value).toBe(false);
+    });
+
+    test('After the partial open cycle the switch reads ON', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.partialOpenMs = 2000;
+        instance.currentDoorState = CDS.CLOSED;
+        instance.characteristicCurrentDoorState.value = CDS.CLOSED;
+        instance.characteristicPartialOpen.value = false;
+        instance.desiredTarget = TDS.CLOSED;
+
+        instance._handlePartialOpen();
+        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+        expect(instance.characteristicPartialOpen.value).toBe(true);
+    });
+
+    test('A subsequent close cycle flips the switch back to OFF', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.partialOpenMs = 2000;
+        instance.currentDoorState = CDS.OPEN;
+        instance.characteristicCurrentDoorState.value = CDS.OPEN;
+        instance.characteristicPartialOpen.value = true;
+
+        // Simulate the user tapping the switch OFF — close cycle queued.
+        instance.setTargetDoorState(TDS.CLOSED);
+        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        expect(device.update).toHaveBeenNthCalledWith(2, { '3': true });
+        emitReset(device, '3');
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+        expect(instance.characteristicPartialOpen.value).toBe(false);
     });
 });

@@ -426,11 +426,13 @@ For very basic garage door openers and sliding gate controllers that expose only
     /* Override the default datapoint identifier for the close action */
     "dpClose": 3,
 
-    /* Optional. If set, exposes an extra momentary switch that opens the
-       gate and then stops it this many milliseconds after the device
-       acknowledges the open, leaving the gate partially open. Useful
-       for letting someone pass through briefly. Leave unset to skip
-       the switch. */
+    /* Optional. If set, exposes an extra stateful switch that mirrors
+       whether the gate is currently open in HomeKit's view. Tapping it
+       ON triggers a partial-open: the gate opens and then stops itself
+       this many milliseconds after the device acknowledges the open,
+       leaving the gate partially open. Tapping it OFF triggers a
+       standard full close. Useful for letting someone pass through
+       briefly. Leave unset to skip the switch. */
     "partialOpenMs": 2000,
 
     /* Optional. Exposes extra Force Open and Force Close momentary
