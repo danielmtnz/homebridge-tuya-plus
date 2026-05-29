@@ -551,7 +551,65 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         expect(device.update).toHaveBeenNthCalledWith(3, { '2': true });
     });
 
-    test('External setTargetDoorState while the stop timer is armed cancels the auto-stop', async () => {
+    test('A same-value setTargetDoorState while the partial stop is armed does not cancel it', async () => {
+        // HomeKit / iOS Home may write TargetDoorState=OPEN back to the
+        // accessory after observing CurrentDoorState flip to OPEN (a
+        // resync). desiredTarget is already OPEN from the partial flow's
+        // own _setTarget, so this is a no-op write — but the public
+        // setTargetDoorState path would still cancel the armed partial
+        // stop and the auto-stop would never fire, leaving the gate to
+        // run all the way open. The no-op write should be ignored.
+        const { instance, device } = makeSimpleGarage();
+        instance.partialOpenMs = 2000;
+        instance.currentDoorState = CDS.CLOSED;
+        instance.characteristicCurrentDoorState.value = CDS.CLOSED;
+        instance.desiredTarget = TDS.CLOSED;
+
+        instance._handlePartialOpen();
+        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+        expect(instance.partialStopTimer).not.toBeNull();
+
+        // Simulate the HomeKit-side resync write.
+        instance.setTargetDoorState(TDS.OPEN);
+        expect(instance.partialStopTimer).not.toBeNull();
+
+        await jest.advanceTimersByTimeAsync(2000);
+        expect(device.update).toHaveBeenNthCalledWith(3, { '2': true });
+    });
+
+    test('A same-value setTargetDoorState during the open wait does not supersede the partial flow', async () => {
+        const { instance, device } = makeSimpleGarage();
+        instance.partialOpenMs = 2000;
+        instance.currentDoorState = CDS.CLOSED;
+        instance.characteristicCurrentDoorState.value = CDS.CLOSED;
+        instance.desiredTarget = TDS.CLOSED;
+
+        instance._handlePartialOpen();
+        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
+
+        // HomeKit pushes a TargetDoorState=OPEN write mid-cycle. The partial
+        // flow's _setTarget already set desiredTarget=OPEN, so this is
+        // redundant — it should not disturb the in-flight partial.
+        const idBefore = instance.partialOpenId;
+        instance.setTargetDoorState(TDS.OPEN);
+        expect(instance.partialOpenId).toBe(idBefore);
+        expect(instance._partialPending).toBe(true);
+
+        emitReset(device, '2');
+        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
+        emitReset(device, '1');
+        await jest.advanceTimersByTimeAsync(0);
+
+        await jest.advanceTimersByTimeAsync(2000);
+        expect(device.update).toHaveBeenNthCalledWith(3, { '2': true });
+    });
+
+    test('External setTargetDoorState with a different target cancels the armed auto-stop', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.CLOSED;
@@ -569,19 +627,14 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         expect(instance.currentDoorState).toBe(CDS.OPEN);
         expect(instance.partialStopTimer).not.toBeNull();
 
-        // Stop timer is now armed (fires in 2 s). User toggles directly to
-        // OPEN before it fires — auto-stop should be cancelled.
+        // Stop timer is now armed (fires in 2 s). User toggles to a real
+        // different target (CLOSED) — auto-stop should be cancelled.
         await jest.advanceTimersByTimeAsync(500);
-        instance.setTargetDoorState(TDS.OPEN);
+        instance.setTargetDoorState(TDS.CLOSED);
         expect(instance.partialStopTimer).toBeNull();
-
-        await jest.advanceTimersByTimeAsync(10_000);
-        // No further commands — desiredTarget==current already and the
-        // partial stop is no longer pending.
-        expect(device.update).toHaveBeenCalledTimes(2);
     });
 
-    test('External setTargetDoorState during the open wait supersedes the partial flow', async () => {
+    test('External setTargetDoorState with a different target during the open wait supersedes the partial flow', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.CLOSED;
@@ -593,16 +646,13 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         emitReset(device, '2');
         await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
         emitReset(device, '1');
-        // Before the loop notices and arms the stop timer, the user toggles.
-        instance.setTargetDoorState(TDS.OPEN);
+        // Before the loop notices and arms the stop timer, the user toggles
+        // to a real different target (CLOSED — the partial intended OPEN).
+        instance.setTargetDoorState(TDS.CLOSED);
         await jest.advanceTimersByTimeAsync(0);
 
         // partialOpenId got bumped — the partial flow's wait returns silently.
         expect(instance.partialStopTimer).toBeNull();
-
-        await jest.advanceTimersByTimeAsync(10_000);
-        // Two commands total for the open cycle, nothing further.
-        expect(device.update).toHaveBeenCalledTimes(2);
     });
 
     test('Does nothing when partialOpenMs is not configured', async () => {
@@ -662,7 +712,7 @@ describe('SimpleGarageDoorAccessory — force switches', () => {
         expect(instance.currentDoorState).toBe(CDS.CLOSED);
     });
 
-    test('A force action while a partial stop is armed cancels the auto-stop', async () => {
+    test('A force action with a different target cancels the in-flight partial', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.OPEN;
@@ -673,12 +723,13 @@ describe('SimpleGarageDoorAccessory — force switches', () => {
         await jest.advanceTimersByTimeAsync(0);
         expect(instance.partialStopTimer).not.toBeNull();
 
-        // Force Open pressed before the auto-stop fires.
-        instance.setTargetDoorState(TDS.OPEN);
+        // Force Close pressed before the auto-stop fires. The different
+        // target indicates a real user override — cancel the partial.
+        instance.setTargetDoorState(TDS.CLOSED);
         expect(instance.partialStopTimer).toBeNull();
 
-        await jest.advanceTimersByTimeAsync(10_000);
-        // No queued action: desiredTarget == current, partial stop cancelled.
-        expect(device.update).not.toHaveBeenCalled();
+        // The new target (CLOSED) is acted on through the regular queue.
+        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
     });
 });
