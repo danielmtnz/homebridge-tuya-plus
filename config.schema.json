@@ -521,7 +521,7 @@
             "partialOpenMs": {
               "type": "integer",
               "placeholder": "2000",
-              "description": "Optional. If set, exposes an additional momentary switch that opens the gate and then closes it again after this many milliseconds (measured from when the gate has fully opened). Leave empty to skip the switch.",
+              "description": "Optional. If set, exposes an additional momentary switch that opens the gate and then stops it again after this many milliseconds (measured from when the device acknowledges the open command), leaving the gate partially open. Leave empty to skip the switch.",
               "condition": {
                 "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
               }

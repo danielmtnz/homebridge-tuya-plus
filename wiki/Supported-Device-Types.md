@@ -427,9 +427,10 @@ For very basic garage door openers and sliding gate controllers that expose only
     "dpClose": 3,
 
     /* Optional. If set, exposes an extra momentary switch that opens the
-       gate and then closes it again this many milliseconds after the
-       gate has fully opened. Useful for letting someone pass through
-       briefly. Leave unset to skip the switch. */
+       gate and then stops it this many milliseconds after the device
+       acknowledges the open, leaving the gate partially open. Useful
+       for letting someone pass through briefly. Leave unset to skip
+       the switch. */
     "partialOpenMs": 2000,
 
     /* Optional. Exposes extra Force Open and Force Close momentary

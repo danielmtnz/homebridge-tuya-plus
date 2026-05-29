@@ -52,7 +52,7 @@ function makeSimpleGarage(initialContext = {}) {
     instance.desiredTarget = TDS.OPEN;
     instance.worker = null;
     instance.scheduleTimer = null;
-    instance.partialCloseTimer = null;
+    instance.partialStopTimer = null;
     instance.partialOpenId = 0;
     instance._currentChangePending = null;
     instance._currentChangeResolve = null;
@@ -436,7 +436,7 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
     beforeEach(() => jest.useFakeTimers());
     afterEach(() => jest.useRealTimers());
 
-    test('Opens the gate, waits partialOpenMs after current=OPEN, then closes', async () => {
+    test('Opens the gate, waits partialOpenMs after current=OPEN, then sends a raw STOP', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.CLOSED;
@@ -452,7 +452,7 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
         expect(device.update).toHaveBeenNthCalledWith(2, { '1': true });
 
-        // Until the open echo lands the close timer is not scheduled.
+        // Until the open echo lands the stop timer is not scheduled.
         // (Stay short of DIRECTION_RESET_TIMEOUT_MS so the belt-and-braces
         // current-state flip doesn't run yet.)
         await jest.advanceTimersByTimeAsync(1000);
@@ -467,21 +467,19 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         await jest.advanceTimersByTimeAsync(2000 - 1);
         expect(device.update).toHaveBeenCalledTimes(2);
 
-        // Timer fires, close gets queued through the same debounce + worker.
+        // Timer fires: raw STOP write goes straight to the device, no queue,
+        // no debounce, no follow-up direction.
         await jest.advanceTimersByTimeAsync(1);
-        await jest.advanceTimersByTimeAsync(SETTLE_MS);
+        expect(device.update).toHaveBeenCalledTimes(3);
         expect(device.update).toHaveBeenNthCalledWith(3, { '2': true });
 
-        emitReset(device, '2');
-        await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
-        expect(device.update).toHaveBeenNthCalledWith(4, { '3': true });
-
-        emitReset(device, '3');
-        await jest.advanceTimersByTimeAsync(0);
-        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+        await jest.advanceTimersByTimeAsync(10_000);
+        expect(device.update).toHaveBeenCalledTimes(3);
+        // Gate is now partially open — CurrentDoorState stays OPEN.
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
     });
 
-    test('Schedules the close timer immediately if the gate is already OPEN', async () => {
+    test('Sends only the raw STOP if the gate is already OPEN', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.OPEN;
@@ -492,11 +490,12 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         // No open cycle needed — desiredTarget==current already.
         expect(device.update).not.toHaveBeenCalled();
 
-        await jest.advanceTimersByTimeAsync(2000 + SETTLE_MS);
+        await jest.advanceTimersByTimeAsync(2000);
+        expect(device.update).toHaveBeenCalledTimes(1);
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
     });
 
-    test('Pressing partial again before the close timer fires restarts the timer', async () => {
+    test('Pressing partial again before the stop timer fires restarts the timer', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.OPEN;
@@ -514,11 +513,11 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         await jest.advanceTimersByTimeAsync(1999);
         expect(device.update).not.toHaveBeenCalled();
 
-        await jest.advanceTimersByTimeAsync(1 + SETTLE_MS);
+        await jest.advanceTimersByTimeAsync(1);
         expect(device.update).toHaveBeenNthCalledWith(1, { '2': true });
     });
 
-    test('External setTargetDoorState during the partial wait cancels the auto-close', async () => {
+    test('External setTargetDoorState while the stop timer is armed cancels the auto-stop', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.CLOSED;
@@ -534,15 +533,17 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         emitReset(device, '1');
         await jest.advanceTimersByTimeAsync(0);
         expect(instance.currentDoorState).toBe(CDS.OPEN);
+        expect(instance.partialStopTimer).not.toBeNull();
 
-        // Close timer is now armed (fires in 2 s). User toggles directly to
-        // OPEN before it fires — auto-close should be cancelled.
+        // Stop timer is now armed (fires in 2 s). User toggles directly to
+        // OPEN before it fires — auto-stop should be cancelled.
         await jest.advanceTimersByTimeAsync(500);
         instance.setTargetDoorState(TDS.OPEN);
-        expect(instance.partialCloseTimer).toBeNull();
+        expect(instance.partialStopTimer).toBeNull();
 
         await jest.advanceTimersByTimeAsync(10_000);
-        // No further commands — desiredTarget==current already.
+        // No further commands — desiredTarget==current already and the
+        // partial stop is no longer pending.
         expect(device.update).toHaveBeenCalledTimes(2);
     });
 
@@ -558,12 +559,12 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         emitReset(device, '2');
         await jest.advanceTimersByTimeAsync(POST_RESET_DELAY_MS);
         emitReset(device, '1');
-        // Before the loop notices and arms the close timer, the user toggles.
+        // Before the loop notices and arms the stop timer, the user toggles.
         instance.setTargetDoorState(TDS.OPEN);
         await jest.advanceTimersByTimeAsync(0);
 
         // partialOpenId got bumped — the partial flow's wait returns silently.
-        expect(instance.partialCloseTimer).toBeNull();
+        expect(instance.partialStopTimer).toBeNull();
 
         await jest.advanceTimersByTimeAsync(10_000);
         // Two commands total for the open cycle, nothing further.
@@ -579,7 +580,7 @@ describe('SimpleGarageDoorAccessory._handlePartialOpen', () => {
         await jest.advanceTimersByTimeAsync(10_000);
 
         expect(device.update).not.toHaveBeenCalled();
-        expect(instance.partialCloseTimer).toBeNull();
+        expect(instance.partialStopTimer).toBeNull();
     });
 });
 
@@ -627,23 +628,23 @@ describe('SimpleGarageDoorAccessory — force switches', () => {
         expect(instance.currentDoorState).toBe(CDS.CLOSED);
     });
 
-    test('A force action while a partial close is armed cancels the auto-close', async () => {
+    test('A force action while a partial stop is armed cancels the auto-stop', async () => {
         const { instance, device } = makeSimpleGarage();
         instance.partialOpenMs = 2000;
         instance.currentDoorState = CDS.OPEN;
         instance.characteristicCurrentDoorState.value = CDS.OPEN;
 
-        // Partial press while already open: just schedules the close timer.
+        // Partial press while already open: just schedules the stop timer.
         instance._handlePartialOpen();
         await jest.advanceTimersByTimeAsync(0);
-        expect(instance.partialCloseTimer).not.toBeNull();
+        expect(instance.partialStopTimer).not.toBeNull();
 
-        // Force Open pressed before the auto-close fires.
+        // Force Open pressed before the auto-stop fires.
         instance.setTargetDoorState(TDS.OPEN);
-        expect(instance.partialCloseTimer).toBeNull();
+        expect(instance.partialStopTimer).toBeNull();
 
         await jest.advanceTimersByTimeAsync(10_000);
-        // No close cycle: desiredTarget == current, so nothing was queued.
+        // No queued action: desiredTarget == current, partial stop cancelled.
         expect(device.update).not.toHaveBeenCalled();
     });
 });
