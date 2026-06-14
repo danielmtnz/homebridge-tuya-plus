@@ -15,6 +15,7 @@ const ConvectorAccessory = require('./lib/ConvectorAccessory');
 const GarageDoorAccessory = require('./lib/GarageDoorAccessory');
 const SimpleGarageDoorAccessory = require('./lib/SimpleGarageDoorAccessory');
 const WledDimmerAccessory = require('./lib/WledDimmerAccessory');
+const SimpleDimmerAccessory = require('./lib/SimpleDimmerAccessory');
 const SimpleDimmer2Accessory = require('./lib/SimpleDimmer2Accessory');
 const SimpleBlindsAccessory = require('./lib/SimpleBlindsAccessory');
 const SimpleHeaterAccessory = require('./lib/SimpleHeaterAccessory');
@@ -49,7 +50,7 @@ const CLASS_DEF = {
     convector: ConvectorAccessory,
     garagedoor: GarageDoorAccessory,
     simplegaragedoor: SimpleGarageDoorAccessory,
-    simpledimmer: WledDimmerAccessory,
+    simpledimmer: SimpleDimmerAccessory,
     wleddimmer: WledDimmerAccessory,
     simpledimmer2: SimpleDimmer2Accessory,
     simpleblinds: SimpleBlindsAccessory,
