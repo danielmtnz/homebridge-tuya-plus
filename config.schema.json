@@ -576,6 +576,22 @@
                 "functionBody": "return model.devices && model.devices[arrayIndices] && ['Fan', 'FanLight'].includes(model.devices[arrayIndices].type);"
               }
             },
+            "useStringsFan": {
+              "title": "Send fan speed as text",
+              "description": "Overrides \"useStrings\" for the fan only. Set this when the fan's speed data point wants a different value type than the light's brightness and colour temperature. Defaults to whatever \"useStrings\" is.",
+              "type": "boolean",
+              "condition": {
+                "functionBody": "return model.devices && model.devices[arrayIndices] && ['FanLight'].includes(model.devices[arrayIndices].type);"
+              }
+            },
+            "useStringsLight": {
+              "title": "Send brightness and colour temperature as text",
+              "description": "Overrides \"useStrings\" for the light only. Set this when the light's data points want a different value type than the fan's speed. Defaults to whatever \"useStrings\" is.",
+              "type": "boolean",
+              "condition": {
+                "functionBody": "return model.devices && model.devices[arrayIndices] && ['FanLight'].includes(model.devices[arrayIndices].type);"
+              }
+            },
             "singleDpWrites": {
               "title": "Send fan commands one DP at a time",
               "description": "Enable if turning the fan on or changing its speed is silently ignored. Some fan firmwares reject LAN packets that carry more than one data point, so the fan on/off and speed are sent as separate packets instead of combined.",
