@@ -877,8 +877,13 @@ These are accessories that combine fan and lighting control in one device. Suppo
     /* Speed used when the fan is switched on from off. Default: 1 */
     "fanDefaultSpeed": 1,
 
-    /* Send the speed value as a string rather than a number. Default: true */
+    /* Send values as strings rather than numbers, for both the fan speed and
+       the light's brightness / colour temperature. Default: true */
     "useStrings": true,
+
+    /* Override "useStrings" for the fan speed alone. Defaults to "useStrings"
+       (see the note below on fans that want a different type per side) */
+    "useStringsFan": true,
 
     /* Send each data point in its own packet instead of combining fan
        power + speed into one. Default: false (see note below) */
@@ -908,7 +913,27 @@ These are accessories that combine fan and lighting control in one device. Suppo
     "minWhiteColor": 154,
 
     /* Warmest colour temperature, in mireds (~2700 K). Default: 370 */
-    "maxWhiteColor": 370
+    "maxWhiteColor": 370,
+
+    /* Override "useStrings" for the light alone. Defaults to "useStrings" */
+    "useStringsLight": true
+}
+```
+
+#### When the fan and the light want different value types
+
+On most fans a single `useStrings` covers the whole device. Some (e.g. the **Treatlife DS03**) disagree between the two halves — the speed data point takes one type and the light's brightness / colour-temperature data points take the other — which shows up as one half of the accessory working while the other silently ignores commands. Set `useStringsFan` and/or `useStringsLight` to override `useStrings` for just that side; whichever you leave out keeps following `useStrings`, so existing configs are unaffected.
+
+```json5
+{
+    "type": "FanLight",
+    "name": "My Fan with Light",
+    "id": "032000123456789abcde",
+    "key": "0123456789abcdef",
+
+    /* Speed wants a plain number, brightness and colour temperature want strings */
+    "useStringsFan": false,
+    "useStringsLight": true
 }
 ```
 
